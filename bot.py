@@ -8034,130 +8034,143 @@ async def calculator_handler(update, context):
     expr = text.replace("^", "**")
     result = safe_eval(expr)
     await update.message.reply_text(f"🧮 <b>Result:</b> <code>{result}</code>", parse_mode="HTML")
-import sqlite3
-from telegram import Update, Message, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+import logging
+import random
+import asyncio
+import platform
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
-    filters,
-    CallbackQueryHandler
+    filters
 )
-import logging
-import asyncio
+from pymongo import MongoClient
 from datetime import datetime
+from typing import Optional
 
-# Database setup with datetime handling for Python 3.12+
-def init_db():
-    conn = sqlite3.connect('monicbcast.db', detect_types=sqlite3.PARSE_DECLTYPES)
-    cursor = conn.cursor()
-
-    # Register datetime adapter
-    sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
-    sqlite3.register_converter("TIMESTAMP", lambda dt: datetime.fromisoformat(dt.decode()))
-
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS groups (
-        chat_id INTEGER PRIMARY KEY,
-        title TEXT,
-        last_active TIMESTAMP
-    )
-    ''')
-
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        last_name TEXT,
-        last_active TIMESTAMP
-    )
-    ''')
-
-    conn.commit()
-    conn.close()
-
-init_db()
-AUTHORIZED_USERS = [7775049190]  # Replace with your admin user IDs
-BROADCAST_DELAY = 0.5  # Delay between messages in seconds to avoid rate limiting
+  # Your support group link
+ADMIN_IDS = [7775049190]  # Your admin user IDs
+OWNER_ID = 7775049190  # Bot owner ID
+LOG_GROUP_ID = "-1002739262867"  # Your log group ID
+BROADCAST_DELAY = 0.5  # Delay between broadcast messages
 MAX_FAILED_DISPLAY = 5  # Max failed chats to display in report
 
-class DatabaseManager:
-    @staticmethod
-    def get_connection():
-        conn = sqlite3.connect('monicbcast.db', detect_types=sqlite3.PARSE_DECLTYPES)
-        return conn
+# MongoDB Configuration
+MONGODB_URI = "mongodb+srv://ryumasgod:ryumasgod@cluster0.ojfkovp.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+DB_NAME = "yoruichi_bot_db"
 
-    @staticmethod
-    def add_group(chat_id, title=None):
-        conn = DatabaseManager.get_connection()
-        try:
-            conn.execute('''
-            INSERT OR REPLACE INTO groups (chat_id, title, last_active)
-            VALUES (?, ?, ?)
-            ''', (chat_id, title, datetime.now()))
-            conn.commit()
-        finally:
-            conn.close()
+# ===== Setup =====
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-    @staticmethod
-    def add_user(user_id, username=None, first_name=None, last_name=None):
-        conn = DatabaseManager.get_connection()
-        try:
-            conn.execute('''
-            INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, last_active)
-            VALUES (?, ?, ?, ?, ?)
-            ''', (user_id, username, first_name, last_name, datetime.now()))
-            conn.commit()
-        finally:
-            conn.close()
+# ===== MongoDB Manager =====
+class MongoDBManager:
+    def __init__(self):
+        self.client = MongoClient(MONGODB_URI)
+        self.db = self.client[DB_NAME]
+        self.groups = self.db['groups']
+        self.users = self.db['users']
+        self._create_indexes()
 
-    @staticmethod
-    def get_all_groups():
-        conn = DatabaseManager.get_connection()
-        try:
-            return [row[0] for row in conn.execute('SELECT chat_id FROM groups')]
-        finally:
-            conn.close()
+    def _create_indexes(self):
+        """Create necessary indexes"""
+        self.groups.create_index('chat_id', unique=True)
+        self.users.create_index('user_id', unique=True)
 
-    @staticmethod
-    def get_all_users():
-        conn = DatabaseManager.get_connection()
-        try:
-            return [row[0] for row in conn.execute('SELECT user_id FROM users')]
-        finally:
-            conn.close()
+    def add_group(self, chat_id: int, title: Optional[str] = None):
+        """Add or update a group in database"""
+        self.groups.update_one(
+            {'chat_id': chat_id},
+            {'$set': {
+                'title': title,
+                'last_active': datetime.now()
+            }},
+            upsert=True
+        )
 
+    def add_user(self, user_id: int, username: Optional[str] = None, 
+                first_name: Optional[str] = None, last_name: Optional[str] = None):
+        """Add or update a user in database"""
+        self.users.update_one(
+            {'user_id': user_id},
+            {'$set': {
+                'username': username,
+                'first_name': first_name,
+                'last_name': last_name,
+                'last_active': datetime.now()
+            }},
+            upsert=True
+        )
+
+    def get_all_groups(self) -> list[int]:
+        """Get all group chat IDs"""
+        return [group['chat_id'] for group in self.groups.find({}, {'chat_id': 1})]
+
+    def get_all_users(self) -> list[int]:
+        """Get all user IDs"""
+        return [user['user_id'] for user in self.users.find({}, {'user_id': 1})]
+
+# Initialize MongoDB
+mongo_manager = MongoDBManager()
+
+# ===== Tracking Functions =====
 async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Track chats and users in the database"""
+    """Track all chats and users in MongoDB"""
     if not update.message:
         return
 
-    if update.message.chat.type in ['group', 'supergroup']:
-        DatabaseManager.add_group(
-            update.message.chat.id,
-            update.message.chat.title
-        )
+    try:
+        # Track groups/supergroups
+        if update.message.chat.type in ['group', 'supergroup']:
+            mongo_manager.add_group(
+                chat_id=update.message.chat.id,
+                title=update.message.chat.title
+            )
+            logger.info(f"Tracked group: {update.message.chat.id} ({update.message.chat.title})")
 
-    if update.message.from_user:
-        DatabaseManager.add_user(
-            update.message.from_user.id,
-            update.message.from_user.username,
-            update.message.from_user.first_name,
-            update.message.from_user.last_name
-        )
+        # Track private chats
+        elif update.message.chat.type == 'private':
+            mongo_manager.add_user(
+                user_id=update.message.chat.id,
+                username=update.message.chat.username,
+                first_name=update.message.chat.first_name,
+                last_name=update.message.chat.last_name
+            )
+            logger.info(f"Tracked user: {update.message.chat.id}")
 
+        # Track message senders (for groups)
+        if update.message.from_user:
+            mongo_manager.add_user(
+                user_id=update.message.from_user.id,
+                username=update.message.from_user.username,
+                first_name=update.message.from_user.first_name,
+                last_name=update.message.from_user.last_name
+            )
+            logger.info(f"Tracked user: {update.message.from_user.id}")
+
+    except Exception as e:
+        logger.error(f"Error tracking chat: {e}")
+
+
+
+
+# ===== Broadcast Functions =====
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the broadcast command with interactive buttons"""
-    if update.effective_user.id not in AUTHORIZED_USERS:
+    """Handle the broadcast command"""
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("🚫 You are not authorized to use this command.")
         return
-
-    # Get the message to broadcast
+    
+    # Get message to broadcast
     if update.message.reply_to_message:
         message_to_broadcast = update.message.reply_to_message
-        original_sender = message_to_broadcast.forward_from or message_to_broadcast.from_user
+        original_sender = getattr(message_to_broadcast, 'forward_from', None) or message_to_broadcast.from_user
     elif context.args:
         message_to_broadcast = ' '.join(context.args)
         original_sender = update.effective_user
@@ -8167,20 +8180,20 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_to_message_id=update.message.message_id
         )
         return
-
-    # Get destinations and verify
-    destinations = list(set(DatabaseManager.get_all_groups() + DatabaseManager.get_all_users()))
+    
+    # Get destinations from MongoDB
+    destinations = list(set(mongo_manager.get_all_groups() + mongo_manager.get_all_users()))
     if not destinations:
         await update.message.reply_text("❌ No destinations found in database.")
         return
-
+    
     # Create confirmation buttons
     keyboard = [
         [InlineKeyboardButton("✅ Confirm Broadcast", callback_data='confirm_bcast')],
         [InlineKeyboardButton("❌ Cancel", callback_data='cancel_bcast')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
+    
     # Store broadcast data
     context.user_data['pending_broadcast'] = {
         'message': message_to_broadcast,
@@ -8188,17 +8201,17 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'destinations': destinations,
         'original_message_id': update.message.message_id
     }
-
+    
     # Generate preview text
     preview_text = ""
     if isinstance(message_to_broadcast, Message):
         preview_text = message_to_broadcast.text or message_to_broadcast.caption or "[Media message]"
     else:
         preview_text = message_to_broadcast
-
+    
     preview_text = (preview_text[:200] + '...') if len(preview_text) > 200 else preview_text
-
-    # Send confirmation with buttons
+    
+    # Send confirmation
     await update.message.reply_text(
         f"⚠️ Confirm broadcast to {len(destinations)} chats?\n\n"
         f"Message preview:\n\n{preview_text}",
@@ -8207,7 +8220,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button callbacks for broadcast confirmation"""
+    """Handle button callbacks"""
     query = update.callback_query
     await query.answer()
 
@@ -8217,7 +8230,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cancel_broadcast(update, context)
 
 async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Execute the broadcast to all destinations"""
+    """Execute the broadcast"""
     query = update.callback_query
     broadcast_data = context.user_data.get('pending_broadcast')
 
@@ -8236,15 +8249,12 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total_sent = 0
     failed_chats = []
-
-    # Broadcast to all destinations
+    
+    # Broadcast loop
     for i, chat_id in enumerate(destinations):
         try:
             if isinstance(message_to_broadcast, Message):
-                # Forward the original message with sender info
                 await message_to_broadcast.forward(chat_id=chat_id)
-
-                # Handle media with captions
                 if message_to_broadcast.caption and message_to_broadcast.effective_attachment:
                     await context.bot.send_message(
                         chat_id=chat_id,
@@ -8252,12 +8262,11 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_to_message_id=message_to_broadcast.message_id
                     )
             else:
-                # Send text message
                 await context.bot.send_message(chat_id=chat_id, text=message_to_broadcast)
-
+            
             total_sent += 1
-
-            # Update progress periodically
+            
+            # Update progress
             if (i + 1) % 10 == 0 or (i + 1) == len(destinations):
                 percent = int((i + 1) / len(destinations) * 100)
                 await status_msg.edit_text(
@@ -8266,14 +8275,14 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Success: {total_sent}\n"
                     f"❌ Failed: {len(failed_chats)}"
                 )
-
+            
             await asyncio.sleep(BROADCAST_DELAY)
-
+            
         except Exception as e:
             failed_chats.append(str(chat_id))
             logger.error(f"Failed to send to {chat_id}: {e}")
 
-    # Generate final report
+    # Generate report
     report = (
         f"✅ Broadcast completed!\n\n"
         f"📊 Stats:\n"
@@ -8281,24 +8290,23 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Successfully sent: {total_sent}\n"
         f"• Failed to send: {len(failed_chats)}"
     )
-
+    
     if failed_chats:
         report += f"\n\nFailed chats (first {MAX_FAILED_DISPLAY}):\n" + "\n".join(failed_chats[:MAX_FAILED_DISPLAY])
         if len(failed_chats) > MAX_FAILED_DISPLAY:
             report += f"\n(and {len(failed_chats)-MAX_FAILED_DISPLAY} more)"
-
+    
     await status_msg.edit_text(report)
     del context.user_data['pending_broadcast']
 
 async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the pending broadcast"""
+    """Cancel pending broadcast"""
     query = update.callback_query
     await query.answer()
 
     if 'pending_broadcast' in context.user_data:
-        original_message_id = context.user_data['pending_broadcast'].get('original_message_id')
         del context.user_data['pending_broadcast']
-
+    
     await query.edit_message_text("❌ Broadcast canceled.")
 
 
@@ -8536,6 +8544,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links))
     app.add_handler(CommandHandler("bcast", broadcast_command))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, track_chats))
     # Antiraid
     app.add_handler(CommandHandler("antiraid", antiraid_command))
