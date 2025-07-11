@@ -8034,6 +8034,276 @@ async def calculator_handler(update, context):
     expr = text.replace("^", "**")
     result = safe_eval(expr)
     await update.message.reply_text(f"🧮 <b>Result:</b> <code>{result}</code>", parse_mode="HTML")
+import sqlite3
+from telegram import Update, Message, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    CallbackQueryHandler
+)
+import logging
+import asyncio
+from datetime import datetime
+
+# Database setup with datetime handling for Python 3.12+
+def init_db():
+    conn = sqlite3.connect('bot_database.db', detect_types=sqlite3.PARSE_DECLTYPES)
+    cursor = conn.cursor()
+
+    # Register datetime adapter
+    sqlite3.register_adapter(datetime, lambda dt: dt.isoformat())
+    sqlite3.register_converter("TIMESTAMP", lambda dt: datetime.fromisoformat(dt.decode()))
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS groups (
+        chat_id INTEGER PRIMARY KEY,
+        title TEXT,
+        last_active TIMESTAMP
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        last_active TIMESTAMP
+    )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+init_db()
+AUTHORIZED_USERS = [7775049190]  # Replace with your admin user IDs
+BROADCAST_DELAY = 0.5  # Delay between messages in seconds to avoid rate limiting
+MAX_FAILED_DISPLAY = 5  # Max failed chats to display in report
+
+class DatabaseManager:
+    @staticmethod
+    def get_connection():
+        conn = sqlite3.connect('bot_database.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        return conn
+
+    @staticmethod
+    def add_group(chat_id, title=None):
+        conn = DatabaseManager.get_connection()
+        try:
+            conn.execute('''
+            INSERT OR REPLACE INTO groups (chat_id, title, last_active)
+            VALUES (?, ?, ?)
+            ''', (chat_id, title, datetime.now()))
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def add_user(user_id, username=None, first_name=None, last_name=None):
+        conn = DatabaseManager.get_connection()
+        try:
+            conn.execute('''
+            INSERT OR REPLACE INTO users (user_id, username, first_name, last_name, last_active)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, username, first_name, last_name, datetime.now()))
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_all_groups():
+        conn = DatabaseManager.get_connection()
+        try:
+            return [row[0] for row in conn.execute('SELECT chat_id FROM groups')]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def get_all_users():
+        conn = DatabaseManager.get_connection()
+        try:
+            return [row[0] for row in conn.execute('SELECT user_id FROM users')]
+        finally:
+            conn.close()
+
+async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Track chats and users in the database"""
+    if not update.message:
+        return
+
+    if update.message.chat.type in ['group', 'supergroup']:
+        DatabaseManager.add_group(
+            update.message.chat.id,
+            update.message.chat.title
+        )
+
+    if update.message.from_user:
+        DatabaseManager.add_user(
+            update.message.from_user.id,
+            update.message.from_user.username,
+            update.message.from_user.first_name,
+            update.message.from_user.last_name
+        )
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the broadcast command with interactive buttons"""
+    if update.effective_user.id not in AUTHORIZED_USERS:
+        await update.message.reply_text("🚫 You are not authorized to use this command.")
+        return
+
+    # Get the message to broadcast
+    if update.message.reply_to_message:
+        message_to_broadcast = update.message.reply_to_message
+        original_sender = message_to_broadcast.forward_from or message_to_broadcast.from_user
+    elif context.args:
+        message_to_broadcast = ' '.join(context.args)
+        original_sender = update.effective_user
+    else:
+        await update.message.reply_text(
+            "ℹ️ Usage:\n/bcast <message>\nor reply to a message with /bcast",
+            reply_to_message_id=update.message.message_id
+        )
+        return
+
+    # Get destinations and verify
+    destinations = list(set(DatabaseManager.get_all_groups() + DatabaseManager.get_all_users()))
+    if not destinations:
+        await update.message.reply_text("❌ No destinations found in database.")
+        return
+
+    # Create confirmation buttons
+    keyboard = [
+        [InlineKeyboardButton("✅ Confirm Broadcast", callback_data='confirm_bcast')],
+        [InlineKeyboardButton("❌ Cancel", callback_data='cancel_bcast')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Store broadcast data
+    context.user_data['pending_broadcast'] = {
+        'message': message_to_broadcast,
+        'sender': original_sender,
+        'destinations': destinations,
+        'original_message_id': update.message.message_id
+    }
+
+    # Generate preview text
+    preview_text = ""
+    if isinstance(message_to_broadcast, Message):
+        preview_text = message_to_broadcast.text or message_to_broadcast.caption or "[Media message]"
+    else:
+        preview_text = message_to_broadcast
+
+    preview_text = (preview_text[:200] + '...') if len(preview_text) > 200 else preview_text
+
+    # Send confirmation with buttons
+    await update.message.reply_text(
+        f"⚠️ Confirm broadcast to {len(destinations)} chats?\n\n"
+        f"Message preview:\n\n{preview_text}",
+        reply_markup=reply_markup,
+        reply_to_message_id=update.message.message_id
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button callbacks for broadcast confirmation"""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == 'confirm_bcast':
+        await confirm_broadcast(update, context)
+    elif query.data == 'cancel_bcast':
+        await cancel_broadcast(update, context)
+
+async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Execute the broadcast to all destinations"""
+    query = update.callback_query
+    broadcast_data = context.user_data.get('pending_broadcast')
+
+    if not broadcast_data:
+        await query.edit_message_text("❌ No pending broadcast found.")
+        return
+
+    message_to_broadcast = broadcast_data['message']
+    destinations = broadcast_data['destinations']
+
+    # Update status message
+    status_msg = await query.edit_message_text(
+        f"📢 Broadcasting to {len(destinations)} chats...\n\n"
+        "0% complete (0 sent)"
+    )
+
+    total_sent = 0
+    failed_chats = []
+
+    # Broadcast to all destinations
+    for i, chat_id in enumerate(destinations):
+        try:
+            if isinstance(message_to_broadcast, Message):
+                # Forward the original message with sender info
+                await message_to_broadcast.forward(chat_id=chat_id)
+
+                # Handle media with captions
+                if message_to_broadcast.caption and message_to_broadcast.effective_attachment:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=message_to_broadcast.caption,
+                        reply_to_message_id=message_to_broadcast.message_id
+                    )
+            else:
+                # Send text message
+                await context.bot.send_message(chat_id=chat_id, text=message_to_broadcast)
+
+            total_sent += 1
+
+            # Update progress periodically
+            if (i + 1) % 10 == 0 or (i + 1) == len(destinations):
+                percent = int((i + 1) / len(destinations) * 100)
+                await status_msg.edit_text(
+                    f"📢 Broadcasting to {len(destinations)} chats...\n\n"
+                    f"{percent}% complete ({i + 1} sent)\n"
+                    f"✅ Success: {total_sent}\n"
+                    f"❌ Failed: {len(failed_chats)}"
+                )
+
+            await asyncio.sleep(BROADCAST_DELAY)
+
+        except Exception as e:
+            failed_chats.append(str(chat_id))
+            logger.error(f"Failed to send to {chat_id}: {e}")
+
+    # Generate final report
+    report = (
+        f"✅ Broadcast completed!\n\n"
+        f"📊 Stats:\n"
+        f"• Total destinations: {len(destinations)}\n"
+        f"• Successfully sent: {total_sent}\n"
+        f"• Failed to send: {len(failed_chats)}"
+    )
+
+    if failed_chats:
+        report += f"\n\nFailed chats (first {MAX_FAILED_DISPLAY}):\n" + "\n".join(failed_chats[:MAX_FAILED_DISPLAY])
+        if len(failed_chats) > MAX_FAILED_DISPLAY:
+            report += f"\n(and {len(failed_chats)-MAX_FAILED_DISPLAY} more)"
+
+    await status_msg.edit_text(report)
+    del context.user_data['pending_broadcast']
+
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the pending broadcast"""
+    query = update.callback_query
+    await query.answer()
+
+    if 'pending_broadcast' in context.user_data:
+        original_message_id = context.user_data['pending_broadcast'].get('original_message_id')
+        del context.user_data['pending_broadcast']
+
+    await query.edit_message_text("❌ Broadcast canceled.")
+
+
+# Yoruichi-themed assets
+
 
 DATA_FILE = "bot_data.pkl"
 
@@ -8406,7 +8676,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("sg", sg_command))
     app.add_handler(MessageHandler(filters.ALL, sg_message_handler), group=0)
     app.add_handler(CommandHandler("restart", restart))
-    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("bcast", broadcast_command))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, track_chats))
 
     # Logging, bot-added, and antiraid cleanup already handled above
 
