@@ -8544,7 +8544,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_links))
     app.add_handler(CommandHandler("bcast", broadcast_command))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, track_chats))
     # Antiraid
     app.add_handler(CommandHandler("antiraid", antiraid_command))
