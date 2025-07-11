@@ -8052,8 +8052,7 @@ from datetime import datetime
 from typing import Optional
 
   # Your support group link
-ADMIN_IDS = [7775049190]  # Your admin user IDs
-OWNER_ID = 7775049190  # Bot owner ID
+ADMIN_IDS = [7775049190]  # Your admin user IDs  # Bot owner ID
 LOG_GROUP_ID = "-1002739262867"  # Your log group ID
 BROADCAST_DELAY = 0.5  # Delay between broadcast messages
 MAX_FAILED_DISPLAY = 5  # Max failed chats to display in report
@@ -8163,7 +8162,7 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== Broadcast Functions =====
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the broadcast command"""
-    if not is_admin(update.effective_user.id):
+    if update.effective_user.id != 7775049190:  # Only allow this specific user ID
         await update.message.reply_text("🚫 You are not authorized to use this command.")
         return
     
