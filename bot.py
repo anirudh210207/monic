@@ -64,7 +64,7 @@ from telegram.ext import (
 
 
 # --- Config ---
-BOT_TOKEN = 'l loge?'
+BOT_TOKEN = '7847667702:AAG3OYuoMlhIsBRfdsDe7MNuEYi-GLbK-CQ'
 SUPPORT_LINK = "https://t.me/+D2dATbDtZbNiNGJl"
 OWNER_ID = 7819315360
 
