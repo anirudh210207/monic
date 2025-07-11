@@ -8050,7 +8050,7 @@ from datetime import datetime
 
 # Database setup with datetime handling for Python 3.12+
 def init_db():
-    conn = sqlite3.connect('bot_database.db', detect_types=sqlite3.PARSE_DECLTYPES)
+    conn = sqlite3.connect('monicbcast.db', detect_types=sqlite3.PARSE_DECLTYPES)
     cursor = conn.cursor()
 
     # Register datetime adapter
@@ -8086,7 +8086,7 @@ MAX_FAILED_DISPLAY = 5  # Max failed chats to display in report
 class DatabaseManager:
     @staticmethod
     def get_connection():
-        conn = sqlite3.connect('bot_database.db', detect_types=sqlite3.PARSE_DECLTYPES)
+        conn = sqlite3.connect('monicbcast.db', detect_types=sqlite3.PARSE_DECLTYPES)
         return conn
 
     @staticmethod
